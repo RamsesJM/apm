@@ -39,7 +39,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ...models.dependency.mcp import _EXTRA_DENYLIST, opencode_enabled_value
+from ...models.dependency.mcp import (
+    _EXTRA_DENYLIST,
+    opencode_enabled_matches,
+    opencode_enabled_value,
+)
 from ...utils.console import _rich_warning
 from .copilot import CopilotClientAdapter
 
@@ -48,7 +52,7 @@ _ENV_REF_RE = re.compile(re.escape(_ENV_REF_TEMPLATE) % r"([A-Za-z_][A-Za-z0-9_]
 
 _V2_SERVERS_KEY = "servers"
 # Settings that share the ``mcp`` object with v1 server entries in v2 files.
-_V2_MCP_SETTINGS = frozenset({_V2_SERVERS_KEY, "timeout"})
+V2_MCP_SETTINGS = frozenset({_V2_SERVERS_KEY, "timeout"})
 
 
 class OpenCodeClientAdapter(CopilotClientAdapter):
@@ -172,9 +176,10 @@ class OpenCodeClientAdapter(CopilotClientAdapter):
             return False
 
         for name, entry in rendered.items():
-            legacy = mcp.get(name) if name not in _V2_MCP_SETTINGS else None
+            legacy = mcp.get(name) if name not in V2_MCP_SETTINGS else None
             if legacy is not None:
-                if legacy == self._to_opencode_format(config_updates[name], enabled=enabled):
+                written = self._to_opencode_format(config_updates[name], enabled=enabled)
+                if legacy == written and opencode_enabled_matches(legacy, written):
                     del mcp[name]
                 else:
                     _rich_warning(
@@ -213,17 +218,14 @@ class OpenCodeClientAdapter(CopilotClientAdapter):
     def get_current_config(self):
         """Read the current ``opencode.json`` contents.
 
-        For a v2 config, ``mcp`` lists the effective servers: v1-layout
-        entries overlaid by ``mcp.servers``, matching OpenCode's own
-        precedence when both declare a name.
+        For a v2 config, ``mcp`` lists only the ``mcp.servers`` entries.
+        A server still in the v1 layout then counts as not installed, so a
+        reinstall writes its native entry and retires the v1 one.
         """
         config = self._read_config_file()
         if not self.uses_native_v2(config):
             return config
-        mcp = config["mcp"]
-        effective = {name: entry for name, entry in mcp.items() if name not in _V2_MCP_SETTINGS}
-        effective.update(mcp[_V2_SERVERS_KEY])
-        return {**config, "mcp": effective}
+        return {**config, "mcp": dict(config["mcp"][_V2_SERVERS_KEY])}
 
     def _read_config_file(self) -> dict:
         """Return the parsed config file, or ``{}`` when it is absent or unreadable."""
@@ -326,7 +328,9 @@ class OpenCodeClientAdapter(CopilotClientAdapter):
 
         Identical to the v1 entry except that ``enabled`` becomes
         ``disabled: true`` when false and is omitted when true, the v2
-        default.  Passthrough fields such as ``codemode`` are kept as is.
+        default.  ``disabled`` always follows ``enabled``, even when an
+        extra field supplies it; other passthrough fields such as
+        ``codemode`` are kept as is.
 
         Raises:
             ValueError: *enabled* is not a boolean, so it has no v2 equivalent.
@@ -337,6 +341,7 @@ class OpenCodeClientAdapter(CopilotClientAdapter):
             )
         entry = cls._to_opencode_format(copilot_entry, enabled=enabled)
         del entry["enabled"]
+        entry.pop("disabled", None)
         if not enabled:
             entry["disabled"] = True
         return entry

@@ -223,7 +223,8 @@ To opt in, add an empty map to the target file and reinstall:
 In the OpenCode 2 layout, `enabled: false` is written as `disabled: true`,
 and `enabled: true` or an omitted value writes no field, the OpenCode 2
 default. Other values have no OpenCode 2 equivalent, so APM warns and
-leaves the file unchanged. To expose a server's tools directly instead of
+leaves the file unchanged. A `disabled` value in the `extra` block is
+ignored, so `enabled` alone decides. To expose a server's tools directly instead of
 through Code Mode, set `codemode: false` in the dependency's `extra` block;
 APM writes extra fields verbatim, so use the OpenCode 2 spelling for any
 other native setting, such as snake_case `oauth` fields.

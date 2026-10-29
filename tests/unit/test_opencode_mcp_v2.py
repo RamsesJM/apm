@@ -70,6 +70,15 @@ class TestToOpencodeV2Format(unittest.TestCase):
         result = OpenCodeClientAdapter._to_opencode_v2_format({**REMOTE_ENTRY, "codemode": False})
         self.assertIs(result["codemode"], False)
 
+    def test_modeled_enabled_overrides_disabled_passthrough(self):
+        for passthrough in (True, False, "yes"):
+            with self.subTest(passthrough=passthrough):
+                entry = {**LOCAL_ENTRY, "disabled": passthrough}
+                enabled = OpenCodeClientAdapter._to_opencode_v2_format(entry, enabled=True)
+                disabled = OpenCodeClientAdapter._to_opencode_v2_format(entry, enabled=False)
+                self.assertNotIn("disabled", enabled)
+                self.assertIs(disabled["disabled"], True)
+
 
 class _ProjectFixture(unittest.TestCase):
     def setUp(self):
@@ -146,6 +155,15 @@ class TestUpdateConfigV2(_ProjectFixture):
         self.assertEqual(config["mcp"]["pkg"], edited)
         self.assertIn("pkg", config["mcp"]["servers"])
 
+    def test_keeps_legacy_entry_whose_enabled_type_changed(self):
+        edited = {**OpenCodeClientAdapter._to_opencode_format(LOCAL_ENTRY), "enabled": 1}
+        self.write_config({"mcp": {"pkg": edited, "servers": {}}})
+
+        self.adapter.update_config({"pkg": LOCAL_ENTRY})
+
+        legacy = self.read_config()["mcp"]["pkg"]
+        self.assertIs(type(legacy["enabled"]), int)
+
     def test_v1_file_keeps_v1_layout(self):
         self.write_config({"mcp": {"personal": {"type": "local", "command": ["me"]}}})
 
@@ -157,22 +175,32 @@ class TestUpdateConfigV2(_ProjectFixture):
 
 
 class TestReadAndRenderV2(_ProjectFixture):
-    def test_current_config_lists_effective_servers(self):
+    def test_current_config_lists_only_native_servers(self):
         self.write_config(
             {
                 "mcp": {
                     "timeout": {"startup": 5000},
                     "legacy": {"type": "local", "command": ["old"]},
-                    "both": {"type": "local", "command": ["v1"]},
-                    "servers": {"both": {"type": "local", "command": ["v2"]}},
+                    "servers": {"native": {"type": "local", "command": ["new"]}},
                 }
             }
         )
 
         servers = self.adapter.get_current_config()["mcp"]
 
-        self.assertEqual(set(servers), {"legacy", "both"})
-        self.assertEqual(servers["both"]["command"], ["v2"])
+        self.assertEqual(servers, {"native": {"type": "local", "command": ["new"]}})
+
+    def test_legacy_only_server_is_reported_as_needing_installation(self):
+        from apm_cli.integration.mcp_integrator import MCPIntegrator
+
+        legacy = OpenCodeClientAdapter._to_opencode_format(LOCAL_ENTRY)
+        self.write_config({"mcp": {"pkg": legacy, "servers": {}}})
+
+        pending = MCPIntegrator._check_self_defined_servers_needing_installation(
+            ["pkg"], ["opencode"], project_root=self.root
+        )
+
+        self.assertEqual(pending, ["pkg"])
 
     def test_render_matches_written_v2_entry(self):
         self.write_config({"mcp": {"servers": {}}})
@@ -201,13 +229,12 @@ class TestRemoveStaleV2(unittest.TestCase):
         MCPIntegrator.remove_stale(names, runtime="opencode", project_root=self.root)
         return json.loads(self.config_path.read_text(encoding="utf-8"))
 
-    def test_removes_from_servers_and_legacy_layout(self):
+    def test_removes_native_entry_and_preserves_settings(self):
         self.config_path.write_text(
             json.dumps(
                 {
                     "mcp": {
                         "timeout": {"startup": 5000},
-                        "stale": {"type": "local"},
                         "servers": {"stale": {"type": "local"}, "keep": {"type": "local"}},
                     }
                 }
@@ -218,8 +245,39 @@ class TestRemoveStaleV2(unittest.TestCase):
         mcp = self.remove_stale({"stale"})["mcp"]
 
         self.assertEqual(mcp["timeout"], {"startup": 5000})
-        self.assertNotIn("stale", mcp)
         self.assertEqual(set(mcp["servers"]), {"keep"})
+
+    def test_stale_name_never_removes_v2_settings(self):
+        self.config_path.write_text(
+            json.dumps(
+                {"mcp": {"timeout": {"startup": 5000}, "servers": {"timeout": {"type": "local"}}}}
+            ),
+            encoding="utf-8",
+        )
+
+        mcp = self.remove_stale({"timeout"})["mcp"]
+
+        self.assertEqual(mcp, {"timeout": {"startup": 5000}, "servers": {}})
+
+    def test_kept_legacy_entry_survives_pruning_of_native_entry(self):
+        edited = {"type": "local", "command": ["edited"]}
+        self.config_path.write_text(
+            json.dumps({"mcp": {"pkg": edited, "servers": {"pkg": {"type": "local"}}}}),
+            encoding="utf-8",
+        )
+
+        mcp = self.remove_stale({"pkg"})["mcp"]
+
+        self.assertEqual(mcp, {"pkg": edited, "servers": {}})
+
+    def test_legacy_only_entry_is_pruned_in_v2_file(self):
+        self.config_path.write_text(
+            json.dumps({"mcp": {"pkg": {"type": "local"}, "servers": {}}}), encoding="utf-8"
+        )
+
+        mcp = self.remove_stale({"pkg"})["mcp"]
+
+        self.assertEqual(mcp, {"servers": {}})
 
     def test_stale_name_never_removes_the_servers_map(self):
         self.config_path.write_text(

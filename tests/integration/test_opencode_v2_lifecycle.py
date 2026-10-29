@@ -107,3 +107,48 @@ def test_opencode_v2_install_reinstall_and_prune(tmp_path: Path, apm_binary_path
     dump_yaml(manifest, project / "apm.yml")
     install("opencode-v2-non-boolean-enabled")
     assert config_path.read_bytes() == pruned
+
+
+def test_opencode_v1_install_moves_to_v2_after_opt_in(
+    tmp_path: Path, apm_binary_path: Path
+) -> None:
+    """Adding an empty mcp.servers map makes the next install write native entries."""
+    isolated = IsolatedApmEnvironment.create(tmp_path / "scenario", base_env=dict(os.environ))
+    project = isolated.work_root / "project"
+    project.mkdir()
+    (project / ".opencode").mkdir()
+    config_path = project / "opencode.json"
+    config_path.write_text(json.dumps({"mcp": {"personal": PERSONAL_SERVER}}), encoding="utf-8")
+    manifest = {
+        "name": "opencode-v2-migration",
+        "version": "1.0.0",
+        "targets": ["opencode"],
+        "dependencies": {
+            "apm": [],
+            "mcp": [{"name": "local", "registry": False, "transport": "stdio", "command": "echo"}],
+        },
+    }
+    dump_yaml(manifest, project / "apm.yml")
+    LockFile().write(project / "apm.lock.yaml")
+    runner = ApmLifecycleRunner((str(apm_binary_path),))
+    environment = isolated.subprocess_env()
+
+    result = runner.run(
+        ("install", "--no-policy"), cwd=project, env=environment, scenario_id="opencode-v1-install"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    v1_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert v1_config["mcp"]["local"]["enabled"] is True
+    assert "servers" not in v1_config["mcp"]
+
+    v1_config["mcp"]["servers"] = {}
+    config_path.write_text(json.dumps(v1_config), encoding="utf-8")
+    result = runner.run(
+        ("install", "--no-policy"), cwd=project, env=environment, scenario_id="opencode-v2-opt-in"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    mcp = json.loads(config_path.read_text(encoding="utf-8"))["mcp"]
+    assert set(mcp) == {"personal", "servers"}
+    assert mcp["personal"] == PERSONAL_SERVER
+    assert set(mcp["servers"]) == {"local"}
+    assert "enabled" not in mcp["servers"]["local"]
