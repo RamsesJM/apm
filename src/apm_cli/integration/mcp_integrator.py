@@ -19,7 +19,7 @@ import os
 import re
 import shutil
 import warnings
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -131,6 +131,7 @@ def _clean_json_mcp_config(
     trailing_newline: bool = False,
     use_rich: bool = False,
     fail_on_write_error: bool = False,
+    nested_servers: Callable[[dict], dict | None] | None = None,
 ) -> int:
     """Remove stale entries from a JSON-based MCP config file.
 
@@ -143,6 +144,9 @@ def _clean_json_mcp_config(
         trailing_newline: When True, append a trailing newline after JSON serialisation.
         use_rich: When True, emit removal notices via ``_rich_success``; otherwise use
             ``logger.progress``.
+        nested_servers: Returns a second server map inside the parsed config,
+            or ``None``.  Stale names are removed from it as well, for layouts
+            such as OpenCode v2 that keep servers below the top-level key.
 
     Returns:
         Number of entries removed.
@@ -164,9 +168,17 @@ def _clean_json_mcp_config(
         servers = config.get(servers_key, {})
         if not isinstance(servers, dict):
             raise ValueError(f"{label} {servers_key} must be a mapping")
-        removed = [n for n in stale_names if n in servers]
+        nested = nested_servers(config) if nested_servers else None
+        removed = [
+            n for n in stale_names if n in servers and (nested is None or servers[n] is not nested)
+        ]
         for name in removed:
             del servers[name]
+        if nested:
+            nested_removed = [n for n in stale_names if n in nested]
+            for name in nested_removed:
+                del nested[name]
+            removed = sorted(builtins.set(removed) | builtins.set(nested_removed))
         if removed:
             text = json.dumps(config, indent=2)
             if trailing_newline:
@@ -871,6 +883,7 @@ class MCPIntegrator:
                     "OpenCode MCP config",
                     servers_key="mcp",
                     fail_on_write_error=fail_on_write_error,
+                    nested_servers=OpenCodeClientAdapter.native_v2_servers,
                 )
 
         if "windsurf" in target_runtimes:
